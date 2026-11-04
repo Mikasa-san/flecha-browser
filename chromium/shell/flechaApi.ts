@@ -41,10 +41,49 @@ on('site-icons', (icons: Record<string, string>) => {
 // The frame page lays its window out: the background says how, this page adds the colour.
 let frameState: { sidebar: chrome.flechaPrivate.SidebarMode; overlay: boolean } | undefined;
 const windowId = surface === 'window' && framed ? chrome.flechaPrivate.getWindowId() : undefined;
+
+/**
+ * Glass (Settings › Appearance): the Space colour goes to the browser with an alpha
+ * (#rrggbbaa), and the window turns see-through behind it (patch 0055). A browser without
+ * that patch turns the colour down; the window then stays opaque and so does the sidebar.
+ */
+let nativeGlass: boolean | undefined;
+let frameCall = 0;
+function setGlass(alpha: number | undefined) {
+  const root = document.documentElement;
+  if (alpha === undefined) {
+    delete root.dataset.glass;
+    root.style.removeProperty('--glass-alpha');
+  } else {
+    root.dataset.glass = '';
+    root.style.setProperty('--glass-alpha', alpha.toFixed(2));
+  }
+}
+/** How solid the tint is for a transparency of 0–100: never fully clear, so text stays readable. */
+const glassAlpha = (transparency: number) => 1 - (Math.min(100, Math.max(0, transparency)) / 100) * 0.88;
 function applyFrame() {
   if (!windowId || !frameState || !lastState) return;
-  const background = spaceTint(lastState.tint, systemDark.matches);
-  void windowId.then((id) => chrome.flechaPrivate.setFrame({ ...frameState!, background }, id));
+  const call = ++frameCall;
+  const tint = spaceTint(lastState.tint, systemDark.matches);
+  const state = frameState;
+  const wantGlass = lastState.glass !== false && !incognito && nativeGlass !== false;
+  const alpha = glassAlpha(lastState.glassTransparency ?? 45);
+  void windowId.then(async (id) => {
+    if (wantGlass && alpha < 1) {
+      const aa = Math.round(alpha * 255).toString(16).padStart(2, '0');
+      try {
+        await chrome.flechaPrivate.setFrame({ ...state, background: tint + aa }, id);
+        nativeGlass = true;
+        if (call === frameCall) setGlass(alpha);
+        return;
+      } catch {
+        // An older browser: #rrggbb only.
+        nativeGlass = false;
+      }
+    }
+    if (call === frameCall) setGlass(undefined);
+    await chrome.flechaPrivate.setFrame({ ...state, background: tint }, id);
+  });
 }
 on('frame', (state) => {
   frameState = state;
@@ -162,6 +201,7 @@ const api: FlechaApi = {
     await chrome.flechaPrivate.openExtensionAction(id, anchor, await windowId).catch(() => cmd('flash')(`${name} isn’t available on this page`));
   },
   extensionMenu: (id) => void showMenu('extensionMenu', id),
+  extensionsSectionMenu: () => void showMenu('extensionsSectionMenu', ''),
   moveExtension: cmd('moveExtension'),
   setExtensionsCollapsed: cmd('setExtensionsCollapsed'),
 };

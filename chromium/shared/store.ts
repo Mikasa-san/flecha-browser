@@ -475,6 +475,16 @@ export class Store {
     this.changed();
   }
 
+  /** The window's glass and where the Extensions section sits; values out of range are clamped or ignored. */
+  setAppearance(prefs: { glass?: boolean; glassTransparency?: number; extensionsPosition?: 'top' | 'bottom' }) {
+    if (typeof prefs.glass === 'boolean') this.state.glass = prefs.glass;
+    if (typeof prefs.glassTransparency === 'number' && Number.isFinite(prefs.glassTransparency)) {
+      this.state.glassTransparency = Math.round(Math.min(100, Math.max(0, prefs.glassTransparency)));
+    }
+    if (prefs.extensionsPosition === 'top' || prefs.extensionsPosition === 'bottom') this.state.extensionsPosition = prefs.extensionsPosition;
+    this.changed();
+  }
+
   setOnboarded(done: boolean) {
     this.state.onboarded = done;
     this.changed();

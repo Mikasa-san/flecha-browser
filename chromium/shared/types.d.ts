@@ -149,6 +149,12 @@ export interface BrowserState {
   environments?: Environment[];
   /** Built-in ad and tracker blocking; on unless turned off. */
   adBlock?: boolean;
+  /** The window is see-through glass (macOS vibrancy under the Space colour). On unless turned off. */
+  glass?: boolean;
+  /** How see-through the glass is, 0 (solid colour) to 100 (clearest). Default 45. */
+  glassTransparency?: number;
+  /** Where the sidebar's Extensions section sits: under the address bar, or above the Spaces. Default bottom. */
+  extensionsPosition?: 'top' | 'bottom';
   /** The MCP bridge for coding agents: off unless turned on in Settings. */
   agent?: { enabled: boolean; token: string };
   /** The welcome tour has been finished (or skipped). */
@@ -274,6 +280,9 @@ export interface SettingsView {
   /** Why Flecha's native host (imports, the agent bridge) last failed; undefined while it works. */
   hostError?: string;
   theme: 'system' | 'light' | 'dark';
+  glass: boolean;
+  glassTransparency: number;
+  extensionsPosition: 'top' | 'bottom';
   archiveAfterHours: number;
   peekPinnedLinks: boolean;
   shortcuts: ShortcutInfo[];
@@ -402,6 +411,8 @@ export interface FlechaApi {
   /** Opens its popup beside `anchor`, in this page's coordinates. */
   openExtension(id: string, name: string, anchor: { x: number; y: number; width: number; height: number }): void;
   extensionMenu(id: string): void;
+  /** The Extensions section's own menu (its header): where it sits, and its extensions. */
+  extensionsSectionMenu(): void;
   moveExtension(id: string, beforeId?: string): void;
   setExtensionsCollapsed(collapsed: boolean): void;
   onState(cb: (state: UiState) => void): void;

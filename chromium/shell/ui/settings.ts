@@ -338,6 +338,31 @@ for (const card of document.querySelectorAll<HTMLElement>('.theme-card')) {
   card.addEventListener('click', async () => render(await api.set({ theme: card.dataset.theme as SettingsView['theme'] })));
 }
 archiveAfter.addEventListener('change', async () => render(await api.set({ archiveAfterHours: Number(archiveAfter.value) })));
+
+const glass = document.getElementById('glass') as HTMLInputElement;
+const glassTransparency = document.getElementById('glassTransparency') as HTMLInputElement;
+const glassTransparencyValue = document.getElementById('glassTransparencyValue') as HTMLOutputElement;
+const extensionsPosition = document.getElementById('extensionsPosition') as HTMLSelectElement;
+const showTransparency = (value: number) => {
+  glassTransparencyValue.textContent = `${value}%`;
+  glassTransparency.style.setProperty('--fill', `${value}%`);
+};
+glass.addEventListener('change', async () => render(await api.set({ glass: glass.checked })));
+// The window follows the slider as it moves; each step is saved, a few a second at most.
+let transparencyTimer: number | undefined;
+glassTransparency.addEventListener('input', () => {
+  const value = Number(glassTransparency.value);
+  showTransparency(value);
+  clearTimeout(transparencyTimer);
+  transparencyTimer = window.setTimeout(() => void api.set({ glassTransparency: value }), 60);
+});
+glassTransparency.addEventListener('change', async () => {
+  clearTimeout(transparencyTimer);
+  render(await api.set({ glassTransparency: Number(glassTransparency.value) }));
+});
+extensionsPosition.addEventListener('change', async () =>
+  render(await api.set({ extensionsPosition: extensionsPosition.value as SettingsView['extensionsPosition'] })),
+);
 peekPinnedLinks.addEventListener('change', async () => render(await api.set({ peekPinnedLinks: peekPinnedLinks.checked })));
 openLinksInFlechinha.addEventListener('change', async () => render(await api.set({ openLinksInFlechinha: openLinksInFlechinha.checked })));
 
@@ -483,6 +508,14 @@ function render(view: SettingsView) {
     card.setAttribute('aria-checked', String(card.dataset.theme === view.theme));
   }
   archiveAfter.value = String(view.archiveAfterHours);
+  glass.checked = view.glass;
+  if (document.activeElement !== glassTransparency) {
+    glassTransparency.value = String(view.glassTransparency);
+    showTransparency(view.glassTransparency);
+  }
+  glassTransparency.disabled = !view.glass;
+  document.getElementById('glassTransparencyRow')!.classList.toggle('disabled', !view.glass);
+  extensionsPosition.value = view.extensionsPosition;
   peekPinnedLinks.checked = view.peekPinnedLinks;
   if (!recordingId) {
     shortcuts = view.shortcuts;

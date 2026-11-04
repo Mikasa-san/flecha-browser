@@ -1995,3 +1995,68 @@ body[data-sidebar='floating'] #sidebar.peek-leaving {
 .empty-space-emoji:empty {
   display: none;
 }
+
+/* ---- extensions at the top (Settings › Appearance, or the section's menu) ------------
+   The sidebar is a flex column; the toolbar and address bar stay first, the section comes
+   right under them, before favorites and the Space's tabs. */
+
+[data-extensions='top'] #sidebar > .toolbar {
+  order: -3;
+}
+
+[data-extensions='top'] #urlbar-wrap {
+  order: -2;
+}
+
+[data-extensions='top'] #extensions {
+  order: -1;
+  padding-bottom: 2px;
+  border-bottom: 0.5px solid var(--line);
+}
+
+/* ---- glass (Settings › Appearance, patch 0055) ----------------------------------------
+   The browser paints the Space colour at --glass-alpha over the window's macOS material, so
+   the docked sidebar draws no colour of its own and the desktop shows through, blurred.
+   Rows and fields get a frosted fill instead of a flat one, with a hairline highlight as in
+   macOS's own sidebars. The floating sidebar sits over the page, which the material can't
+   show through, so it keeps a solid card. */
+
+[data-glass] {
+  --fill-hover: rgba(255, 255, 255, 0.34);
+  --fill-active: rgba(255, 255, 255, 0.72);
+  --fill-subtle: rgba(255, 255, 255, 0.22);
+  --line: rgba(11, 37, 69, 0.08);
+  --glass-edge: inset 0 0.5px 0 rgba(255, 255, 255, 0.7), 0 0 0 0.5px rgba(11, 37, 69, 0.08), 0 1px 2px rgba(11, 37, 69, 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-glass] {
+    --fill-hover: rgba(255, 255, 255, 0.08);
+    --fill-active: rgba(255, 255, 255, 0.16);
+    --fill-subtle: rgba(255, 255, 255, 0.06);
+    --line: rgba(255, 255, 255, 0.08);
+    --glass-edge: inset 0 0.5px 0 rgba(255, 255, 255, 0.14), 0 0 0 0.5px rgba(0, 0, 0, 0.3);
+  }
+}
+
+[data-glass] body:not([data-sidebar='floating']) #sidebar {
+  background: transparent;
+}
+
+[data-glass] #urlbar-wrap {
+  background: var(--fill-subtle);
+  box-shadow: var(--glass-edge);
+}
+
+[data-glass] .row.active,
+[data-glass] .fav.active {
+  box-shadow: var(--glass-edge);
+}
+
+/* Popovers in the sidebar frost what's under them, like a macOS popover. */
+[data-glass] .popover {
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  backdrop-filter: blur(28px) saturate(180%);
+  box-shadow: var(--shadow-pop), inset 0 0.5px 0 rgba(255, 255, 255, 0.35);
+}

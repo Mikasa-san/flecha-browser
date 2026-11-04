@@ -1,0 +1,471 @@
+--- a/chrome/browser/extensions/api/flecha_private/BUILD.gn
++++ b/chrome/browser/extensions/api/flecha_private/BUILD.gn
+@@ -18,5 +18,9 @@ source_set("flecha_private") {
+     "//chrome/common/extensions/api",
+     "//content/public/browser",
+     "//extensions/browser",
++    "//ui/base",
++    "//ui/gfx",
++    "//ui/menus",
++    "//ui/views",
+   ]
+ }
+--- a/chrome/browser/extensions/api/flecha_private/flecha_private_api.cc
++++ b/chrome/browser/extensions/api/flecha_private/flecha_private_api.cc
+@@ -4,10 +4,23 @@
+ 
+ #include "chrome/browser/extensions/api/flecha_private/flecha_private_api.h"
+ 
++#include <memory>
+ #include <optional>
++#include <set>
+ #include <string>
++#include <utility>
++#include <vector>
+ 
+ #include "base/strings/string_number_conversions.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/memory/weak_ptr.h"
++#include "base/task/sequenced_task_runner.h"
++#include "ui/base/mojom/menu_source_type.mojom.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/menus/simple_menu_model.h"
++#include "ui/views/controls/menu/menu_runner.h"
++#include "ui/views/controls/menu/menu_types.h"
++#include "ui/views/widget/widget.h"
+ #include "base/auto_reset.h"
+ #include "chrome/browser/devtools/devtools_toggle_action.h"
+ #include "chrome/browser/devtools/devtools_window.h"
+@@ -52,17 +65,24 @@ namespace flecha_private = api::flecha_private;
+ 
+ constexpr char kNoWindowError[] = "No Flecha window with id *.";
+ constexpr char kNotAFramePageError[] = "The caller is not a frame page.";
+-constexpr char kBadColorError[] = "background must be #rrggbb.";
++constexpr char kBadColorError[] = "background must be #rrggbb or #rrggbbaa.";
+ constexpr char kNoTabError[] = "No tab with id *.";
+ constexpr char kNotSplitError[] = "The tab is not in a split view.";
+ 
++// #rrggbb, or #rrggbbaa for a see-through (glass) window.
+ std::optional<SkColor> ParseColor(const std::string& text) {
+   uint32_t rgb = 0;
+-  if (text.size() != 7 || text[0] != '#' ||
+-      !base::HexStringToUInt(std::string_view(text).substr(1), &rgb)) {
++  if ((text.size() != 7 && text.size() != 9) || text[0] != '#' ||
++      !base::HexStringToUInt(std::string_view(text).substr(1, 6), &rgb)) {
+     return std::nullopt;
+   }
+-  return SkColorSetRGB((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
++  uint32_t alpha = 0xff;
++  if (text.size() == 9 &&
++      !base::HexStringToUInt(std::string_view(text).substr(7, 2), &alpha)) {
++    return std::nullopt;
++  }
++  return SkColorSetARGB(alpha, (rgb >> 16) & 0xff, (rgb >> 8) & 0xff,
++                        rgb & 0xff);
+ }
+ 
+ // Whether `host`'s window is one the calling shell answers for. The shell runs
+@@ -524,6 +544,185 @@ FlechaPrivateOpenExtensionActionFunction::Run() {
+   return RespondNow(NoArguments());
+ }
+ 
++namespace {
++
++// A native context menu for the shell (showMenu). Owns its menu models, and
++// deletes itself once the menu has closed and the caller has its answer.
++class FlechaShellMenu : public ui::SimpleMenuModel::Delegate {
++ public:
++  struct Item {
++    std::u16string label;
++    int parent = -1;
++    bool enabled = true;
++    std::optional<bool> checked;
++    bool separator = false;
++  };
++  using Done = base::OnceCallback<void(std::optional<int>)>;
++
++  // Command ids are item indices plus one: Chromium keeps 0 for "none".
++  static constexpr int kFirstCommand = 1;
++
++  FlechaShellMenu(std::vector<Item> items, Done done)
++      : items_(std::move(items)),
++        done_(std::move(done)),
++        root_(std::make_unique<ui::SimpleMenuModel>(this)) {
++    std::set<int> submenus;
++    for (const Item& item : items_) {
++      if (item.parent >= 0) {
++        submenus.insert(item.parent);
++      }
++    }
++    std::vector<ui::SimpleMenuModel*> models(items_.size(), nullptr);
++    for (size_t i = 0; i < items_.size(); ++i) {
++      const Item& item = items_[i];
++      ui::SimpleMenuModel* model =
++          item.parent >= 0 ? models[item.parent] : root_.get();
++      if (!model) {
++        continue;  // Its parent was a separator.
++      }
++      const int command = static_cast<int>(i) + kFirstCommand;
++      if (item.separator) {
++        model->AddSeparator(ui::NORMAL_SEPARATOR);
++      } else if (submenus.contains(static_cast<int>(i))) {
++        submenus_.push_back(std::make_unique<ui::SimpleMenuModel>(this));
++        models[i] = submenus_.back().get();
++        model->AddSubMenu(command, item.label, models[i]);
++      } else if (item.checked.has_value()) {
++        model->AddCheckItem(command, item.label);
++      } else {
++        model->AddItem(command, item.label);
++      }
++    }
++  }
++  FlechaShellMenu(const FlechaShellMenu&) = delete;
++  FlechaShellMenu& operator=(const FlechaShellMenu&) = delete;
++  ~FlechaShellMenu() override = default;
++
++  // Shows the menu at `point` (screen coordinates). On macOS this runs the
++  // NSMenu's own event loop and returns once it has closed.
++  void Show(views::Widget* parent, const gfx::Point& point) {
++    runner_ = std::make_unique<views::MenuRunner>(
++        root_.get(), views::MenuRunner::CONTEXT_MENU,
++        base::BindRepeating(&FlechaShellMenu::OnClosed,
++                            weak_factory_.GetWeakPtr()));
++    runner_->RunMenuAt(parent, /*button_controller=*/nullptr,
++                       gfx::Rect(point, gfx::Size()),
++                       views::MenuAnchorPosition::kTopLeft,
++                       ui::mojom::MenuSourceType::kMouse);
++  }
++
++  // Answers without a pick and goes away (no window to show the menu in).
++  void Cancel() { Finish(); }
++
++  // ui::SimpleMenuModel::Delegate:
++  bool IsCommandIdChecked(int command_id) const override {
++    const Item* item = ItemFor(command_id);
++    return item && item->checked.value_or(false);
++  }
++  bool IsCommandIdEnabled(int command_id) const override {
++    const Item* item = ItemFor(command_id);
++    return item && item->enabled;
++  }
++  void ExecuteCommand(int command_id, int event_flags) override {
++    if (ItemFor(command_id)) {
++      picked_ = command_id - kFirstCommand;
++    }
++  }
++
++ private:
++  const Item* ItemFor(int command_id) const {
++    const int index = command_id - kFirstCommand;
++    if (index < 0 || static_cast<size_t>(index) >= items_.size()) {
++      return nullptr;
++    }
++    return &items_[index];
++  }
++
++  // The pick may come in after the menu says it closed; answer a task later,
++  // and never from inside the runner that is calling us.
++  void OnClosed() {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&FlechaShellMenu::Finish,
++                                  weak_factory_.GetWeakPtr()));
++  }
++
++  void Finish() {
++    if (done_) {
++      std::move(done_).Run(picked_);
++    }
++    delete this;
++  }
++
++  const std::vector<Item> items_;
++  Done done_;
++  std::unique_ptr<ui::SimpleMenuModel> root_;
++  std::vector<std::unique_ptr<ui::SimpleMenuModel>> submenus_;
++  std::unique_ptr<views::MenuRunner> runner_;
++  std::optional<int> picked_;
++  base::WeakPtrFactory<FlechaShellMenu> weak_factory_{this};
++};
++
++}  // namespace
++
++ExtensionFunction::ResponseAction FlechaPrivateShowMenuFunction::Run() {
++  auto params = flecha_private::ShowMenu::Params::Create(args());
++  EXTENSION_FUNCTION_VALIDATE(params);
++  content::WebContents* contents = GetSenderWebContents();
++  if (!contents) {
++    return RespondNow(Error("No page to show the menu in."));
++  }
++  std::vector<FlechaShellMenu::Item> items;
++  for (size_t i = 0; i < params->items.size(); ++i) {
++    const flecha_private::MenuItem& row = params->items[i];
++    FlechaShellMenu::Item item;
++    item.label = base::UTF8ToUTF16(row.label.value_or(std::string()));
++    item.parent = row.parent.value_or(-1);
++    // A submenu comes before its items.
++    if (item.parent < -1 || item.parent >= static_cast<int>(i)) {
++      return RespondNow(Error("Item * has a parent after it.",
++                              base::NumberToString(i)));
++    }
++    item.enabled = row.enabled.value_or(true);
++    item.checked = row.checked;
++    item.separator = row.separator.value_or(false);
++    items.push_back(std::move(item));
++  }
++  if (items.empty()) {
++    return RespondNow(NoArguments());
++  }
++
++  const gfx::Point point = contents->GetContainerBounds().origin() +
++                           gfx::Vector2d(params->x, params->y);
++  auto* menu = new FlechaShellMenu(
++      std::move(items),
++      base::BindOnce(
++          [](scoped_refptr<FlechaPrivateShowMenuFunction> function,
++             std::optional<int> picked) {
++            function->Respond(picked ? function->WithArguments(*picked)
++                                     : function->NoArguments());
++          },
++          scoped_refptr<FlechaPrivateShowMenuFunction>(this)));
++  // Shown a task later: on macOS the menu runs its own event loop, which
++  // shouldn't sit inside this call.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<content::WebContents> contents,
++             FlechaShellMenu* menu, gfx::Point point) {
++            views::Widget* parent =
++                contents ? views::Widget::GetTopLevelWidgetForNativeView(
++                               contents->GetNativeView())
++                         : nullptr;
++            if (!parent) {
++              menu->Cancel();
++              return;
++            }
++            menu->Show(parent, point);
++          },
++          contents->GetWeakPtr(), base::Unretained(menu), point));
++  return RespondLater();
++}
++
+ ExtensionFunction::ResponseAction FlechaPrivateShowFindBarFunction::Run() {
+   auto params = flecha_private::ShowFindBar::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
+--- a/chrome/browser/extensions/api/flecha_private/flecha_private_api.h
++++ b/chrome/browser/extensions/api/flecha_private/flecha_private_api.h
+@@ -234,6 +234,16 @@ class FlechaPrivateRunInRegularProfileFunction : public ExtensionFunction {
+   ResponseAction Run() override;
+ };
+ 
++// A native context menu for the shell's pages (showMenu).
++class FlechaPrivateShowMenuFunction : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("flechaPrivate.showMenu", UNKNOWN)
++
++ protected:
++  ~FlechaPrivateShowMenuFunction() override = default;
++  ResponseAction Run() override;
++};
++
+ }  // namespace extensions
+ 
+ #endif  // CHROME_BROWSER_EXTENSIONS_API_FLECHA_PRIVATE_FLECHA_PRIVATE_API_H_
+--- a/chrome/browser/ui/views/frame/browser_frame_view_mac.mm
++++ b/chrome/browser/ui/views/frame/browser_frame_view_mac.mm
+@@ -515,6 +515,17 @@ void BrowserFrameViewMac::OnPaint(gfx::Canvas* canvas) {
+     return;
+   }
+ 
++  // Flecha: a glass window (flecha_frame_view_mac.mm) shows its material
++  // through here; the frame background paints the tint over it.
++  for (NSView* view in GetWidget()
++           ->GetNativeWindow()
++           .GetNativeNSWindow()
++           .contentView.superview.subviews) {
++    if ([view.identifier isEqualToString:@"FlechaGlass"]) {
++      return;
++    }
++  }
++
+   const SkColor frame_color =
+       GetFrameColor(BrowserFrameActiveState::kUseCurrent);
+   canvas->DrawColor(frame_color);
+--- a/chrome/browser/ui/views/frame/flecha_frame_view.cc
++++ b/chrome/browser/ui/views/frame/flecha_frame_view.cc
+@@ -77,7 +77,9 @@ class FlechaFrameBackground : public views::Background {
+       : state_(state) {}
+ 
+   void Paint(gfx::Canvas* canvas, views::View* view) const override {
+-    canvas->DrawColor(state_.background);
++    // Replaces what is there: for glass the colour is translucent and the
++    // window's material shows through it.
++    canvas->DrawColor(state_.background, SkBlendMode::kSrc);
+     gfx::Rect page = view->GetLocalBounds();
+     page.Inset(view->GetInsets());
+     // A page area that fills the window (fullscreen, sidebar hidden) has no
+@@ -249,6 +251,7 @@ class FlechaFrameView::Peek : public content::WebContentsDelegate,
+ #if !BUILDFLAG(IS_MAC)
+ void SetFlechaTrafficLights(views::Widget* widget,
+                             const FlechaFrameState* state) {}
++void SetFlechaWindowGlass(views::Widget* widget, bool glass) {}
+ #endif
+ 
+ // static
+@@ -738,6 +741,10 @@ void FlechaFrameView::ApplyState() {
+   browser_view_->InvalidateLayout();
+   // The traffic lights sit in the frame page's toolbar row, and go with it.
+   SetFlechaTrafficLights(GetWidget(), IsActive() ? &state_ : nullptr);
++  // A translucent background asks for a see-through window.
++  SetFlechaWindowGlass(GetWidget(), IsActive() &&
++                                        SkColorGetA(state_.background) !=
++                                            SK_AlphaOPAQUE);
+ }
+ 
+ BEGIN_METADATA(FlechaFrameView)
+--- a/chrome/browser/ui/views/frame/flecha_frame_view.h
++++ b/chrome/browser/ui/views/frame/flecha_frame_view.h
+@@ -33,6 +33,12 @@ class Widget;
+ void SetFlechaTrafficLights(views::Widget* widget,
+                             const FlechaFrameState* state);
+ 
++// Makes the window of `widget` see-through glass, or opaque again: on macOS a
++// vibrant material behind the window's content (the desktop shows through,
++// blurred), with the window and its compositor transparent so that the frame
++// background's colour (translucent then) tints it. A no-op off macOS.
++void SetFlechaWindowGlass(views::Widget* widget, bool glass);
++
+ // Flecha's window frame (see flecha_frame_host.h): the shell's frame page,
+ // chrome-extension://<shell>/window.html?window=<id>, in a transparent view
+ // stacked above the page area of a normal browser window, plus the window
+--- a/chrome/browser/ui/views/frame/flecha_frame_view_mac.mm
++++ b/chrome/browser/ui/views/frame/flecha_frame_view_mac.mm
+@@ -7,7 +7,80 @@
+ #import <AppKit/AppKit.h>
+ 
+ #import "components/remote_cocoa/app_shim/browser_native_widget_window_mac.h"
++#include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
+ #include "ui/views/widget/widget.h"
++#include "ui/views/window/non_client_view.h"
++
++namespace {
++
++// The window's glass, found again by this identifier
++// (BrowserFrameViewMac::OnPaint looks for it too).
++NSString* const kFlechaGlassIdentifier = @"FlechaGlass";
++
++NSVisualEffectView* FlechaGlassView(NSWindow* window) {
++  for (NSView* view in window.contentView.superview.subviews) {
++    if ([view.identifier isEqualToString:kFlechaGlassIdentifier] &&
++        [view isKindOfClass:[NSVisualEffectView class]]) {
++      return static_cast<NSVisualEffectView*>(view);
++    }
++  }
++  return nil;
++}
++
++}  // namespace
++
++void SetFlechaWindowGlass(views::Widget* widget, bool glass) {
++  if (!widget) {
++    return;
++  }
++  NSWindow* window = widget->GetNativeWindow().GetNativeNSWindow();
++  if (![window isKindOfClass:[BrowserNativeWidgetWindow class]]) {
++    return;
++  }
++  NSVisualEffectView* effect = FlechaGlassView(window);
++  if (glass == (effect != nil)) {
++    return;
++  }
++  auto* host = views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
++      widget->GetNativeWindow());
++  if (glass) {
++    // Under the content view, in the window's frame view: the material the
++    // sidebar of a Finder window has, blending what is behind the window.
++    NSView* content = window.contentView;
++    effect = [[NSVisualEffectView alloc] initWithFrame:content.superview.bounds];
++    effect.identifier = kFlechaGlassIdentifier;
++    effect.material = NSVisualEffectMaterialSidebar;
++    effect.blendingMode = NSVisualEffectBlendingModeBehindWindow;
++    // Glass whether or not the window is key, as the frame page asked.
++    effect.state = NSVisualEffectStateActive;
++    effect.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++    [content.superview addSubview:effect
++                       positioned:NSWindowBelow
++                       relativeTo:content];
++    window.opaque = NO;
++    // Not clearColor: a fully clear background keeps AppKit redrawing the
++    // window (as native_widget_ns_window_bridge.mm notes).
++    window.backgroundColor =
++        [NSColor.windowBackgroundColor colorWithAlphaComponent:0.001];
++    if (host) {
++      host->SetLayerAndCompositorOpaque(false);
++    }
++  } else {
++    [effect removeFromSuperview];
++    window.opaque = YES;
++    window.backgroundColor = NSColor.windowBackgroundColor;
++    if (host) {
++      host->SetLayerAndCompositorOpaque(true);
++    }
++  }
++  [window invalidateShadow];
++  // The frame view stops (or starts again) painting its opaque colour.
++  if (views::NonClientView* non_client = widget->non_client_view()) {
++    if (views::View* frame_view = non_client->frame_view()) {
++      frame_view->SchedulePaint();
++    }
++  }
++}
+ 
+ void SetFlechaTrafficLights(views::Widget* widget,
+                             const FlechaFrameState* state) {
+--- a/chrome/common/extensions/api/flecha_private.idl
++++ b/chrome/common/extensions/api/flecha_private.idl
+@@ -46,10 +46,28 @@ namespace flechaPrivate {
+     // The frame page covers the whole window (command bar, Peek, tour, tab
+     // drag); the page area doesn't move.
+     boolean overlay;
+-    // The window's colour behind the page area, as #rrggbb.
++    // The window's colour behind the page area, as #rrggbb, or #rrggbbaa for
++    // glass: below full alpha the window turns see-through on macOS (the
++    // desktop shows, blurred, through the colour) and the frame page's
++    // transparent pixels show it too.
+     DOMString background;
+   };
+ 
++  // One row of a menu for showMenu(): an item, a separator, or a submenu (an
++  // item that later items name as their parent).
++  dictionary MenuItem {
++    DOMString? label;
++    // The index (in the same list) of the submenu this row is in; the top
++    // level when omitted.
++    long? parent;
++    // Default true.
++    boolean? enabled;
++    // true or false makes the item checkable, with or without its mark.
++    boolean? checked;
++    boolean? separator;
++  };
++  callback MenuCallback = void(optional long index);
++
+   callback DoneCallback = void();
+   callback WindowIdCallback = void(long windowId);
+   callback RejectedCallback = void(DOMString[] rejected);
+@@ -126,6 +144,16 @@ namespace flechaPrivate {
+     // The window the calling frame page belongs to.
+     static void getWindowId(WindowIdCallback callback);
+ 
++    // Shows a native context menu (an NSMenu on macOS, with the system's
++    // look) at (x, y) in the calling page's coordinates, and calls back with
++    // the index of the item picked, or with nothing when the menu was
++    // dismissed.
++    static void showMenu(
++        MenuItem[] items,
++        long x,
++        long y,
++        MenuCallback callback);
++
+     // Flecha's keyboard shortcuts: <code>shortcuts</code> maps Electron
+     // accelerators ("CmdOrCtrl+Shift+T") to the shell's command ids. Flecha
+     // windows take these keys before the page and before Chromium's own

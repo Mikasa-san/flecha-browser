@@ -25,9 +25,32 @@ declare namespace chrome.flechaPrivate {
   interface FrameState {
     sidebar: SidebarMode;
     overlay: boolean;
-    /** The window's colour behind the page area (the Space tint), as #rrggbb. */
+    /**
+     * The window's colour behind the page area (the Space tint), as #rrggbb, or #rrggbbaa for
+     * glass (patch 0055): below full alpha, macOS shows the desktop, blurred, through the
+     * window, and through the frame page's transparent pixels. Older browsers reject #rrggbbaa.
+     */
     background: string;
   }
+
+  /** One row of showMenu(): an item, a separator, or a submenu (a row others name as parent). */
+  interface MenuItem {
+    label?: string;
+    /** The index of the submenu row this one is in; the top level when omitted. */
+    parent?: number;
+    /** Default true. */
+    enabled?: boolean;
+    /** true or false makes the item checkable. */
+    checked?: boolean;
+    separator?: boolean;
+  }
+
+  /**
+   * A native context menu (patch 0055; an NSMenu, so it has the system's own glass look) at
+   * (x, y) in this page's coordinates. Resolves with the picked row's index, or undefined when
+   * dismissed. Absent in older builds.
+   */
+  function showMenu(items: MenuItem[], x: number, y: number): Promise<number | undefined>;
 
   /** Lays out a window's frame. Applies to every normal window when windowId is omitted. */
   function setFrame(state: FrameState, windowId?: number): Promise<void>;

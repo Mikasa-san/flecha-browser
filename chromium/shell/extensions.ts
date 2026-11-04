@@ -64,7 +64,19 @@ async function save(change: (saved: Saved) => void) {
   await send();
 }
 
-export function registerExtensions(openTab: (url: string) => void) {
+/** Where the sidebar's Extensions section sits (Settings › Appearance), kept in the Store. */
+export interface ExtensionsPlacement {
+  get(): 'top' | 'bottom';
+  set(position: 'top' | 'bottom'): void;
+}
+
+/** Moves the whole section, from its menus; the other place than where it is. */
+function moveSectionItem(placement: ExtensionsPlacement): MenuEntry<MenuRun> {
+  const top = placement.get() === 'top';
+  return { label: top ? 'Move Extensions to Bottom' : 'Move Extensions to Top', run: { cmd: 'setExtensionsPosition', args: [top ? 'bottom' : 'top'] } };
+}
+
+export function registerExtensions(openTab: (url: string) => void, placement: ExtensionsPlacement) {
   for (const event of [chrome.management.onInstalled, chrome.management.onUninstalled, chrome.management.onEnabled, chrome.management.onDisabled]) {
     event.addListener(() => void send());
   }
@@ -80,8 +92,30 @@ export function registerExtensions(openTab: (url: string) => void) {
         { label: 'Options', enabled: !!extension.optionsUrl, run: { cmd: 'openExtensionPage', args: [extension.optionsUrl] } },
         { label: 'Manage Extensions', run: { cmd: 'openExtensionPage', args: ['chrome://extensions/'] } },
         { separator: true },
+        moveSectionItem(placement),
+        { separator: true },
         { label: 'Remove…', run: { uninstallExtension: id } },
       ];
+    },
+    extensionsSectionMenu: async (): Promise<MenuEntry<MenuRun>[]> => {
+      const current = await view();
+      const position = placement.get();
+      return [
+        {
+          label: 'Position',
+          submenu: [
+            { label: 'Top, under the Address Bar', checked: position === 'top', run: { cmd: 'setExtensionsPosition', args: ['top'] } },
+            { label: 'Bottom, above the Spaces', checked: position === 'bottom', run: { cmd: 'setExtensionsPosition', args: ['bottom'] } },
+          ],
+        },
+        { label: current.collapsed ? 'Expand' : 'Collapse', run: { cmd: 'setExtensionsCollapsed', args: [!current.collapsed] } },
+        { separator: true },
+        { label: 'Manage Extensions', run: { cmd: 'openExtensionPage', args: ['chrome://extensions/'] } },
+        { label: 'Add Extensions…', run: { cmd: 'openExtensionPage', args: ['https://chromewebstore.google.com/'] } },
+      ];
+    },
+    setExtensionsPosition: (position: 'top' | 'bottom') => {
+      if (position === 'top' || position === 'bottom') placement.set(position);
     },
     openExtensionPage: (url: string) => openTab(String(url)),
     pinExtension: (id: string, pinned: boolean) =>

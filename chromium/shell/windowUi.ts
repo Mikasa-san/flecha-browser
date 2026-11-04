@@ -11,7 +11,7 @@
 import type { UiState } from '../shared/types';
 import { cmd, invoke, on } from './client';
 import type { MenuRun } from './protocol';
-import { askDialog, popupMenu, type MenuEntry } from './settingsUi';
+import { askDialog, hasNativeMenus, popupMenu, type MenuEntry } from './settingsUi';
 
 const framed = typeof chrome.flechaPrivate?.setFrame === 'function';
 const surface = document.documentElement.dataset.surface;
@@ -57,10 +57,11 @@ export function setupWindowUi(h: WindowUiHooks) {
 }
 
 /** Asks for the background's menu `name` about `id`, shows it at the pointer and runs the pick. */
-export async function showMenu(name: 'tabMenu' | 'spaceMenu' | 'extensionMenu', id: string) {
+export async function showMenu(name: 'tabMenu' | 'spaceMenu' | 'extensionMenu' | 'extensionsSectionMenu', id: string) {
   const items = await invoke<MenuEntry<MenuRun>[] | undefined>(name, id);
   if (!items?.length) return;
-  const picked = await overWindow('menu', () => popupMenu(items));
+  // A native menu is a window of its own; only the page's menu needs the frame over the window.
+  const picked = hasNativeMenus ? await popupMenu(items) : await overWindow('menu', () => popupMenu(items));
   if (picked) await runMenuItem(picked.run);
 }
 

@@ -735,7 +735,13 @@ async function start() {
   });
 
   registerSiteControls({ store, activeChromeId, mainWindow });
-  registerExtensions((url) => openTab(url));
+  registerExtensions((url) => openTab(url), {
+    get: () => store.state.extensionsPosition ?? 'bottom',
+    set: (position) => {
+      store.setAppearance({ extensionsPosition: position });
+      sendState();
+    },
+  });
 
   // ---- commands by id, for keyboard shortcuts (the Electron spike's buildMenu) ----
 

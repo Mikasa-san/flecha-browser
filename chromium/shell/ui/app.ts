@@ -98,6 +98,8 @@ function render(s: UiState) {
   ($('btn-forward') as HTMLButtonElement).disabled = !s.nav.canGoForward;
 
   document.body.dataset.sidebar = s.sidebarMode;
+  // Settings › Appearance: the Extensions section under the address bar, or at the bottom.
+  document.documentElement.dataset.extensions = s.extensionsPosition ?? 'bottom';
   if (s.sidebarMode !== 'floating') $('sidebar').classList.remove('peek-leaving');
   // Shortcuts can be changed in Settings; key caps and tooltips show the current ones.
   for (const el of document.querySelectorAll<HTMLElement>('[data-shortcut]')) {
@@ -619,6 +621,12 @@ api.onExtensions((view) => {
 renderExtensions();
 $('btn-extensions-toggle').onclick = () => api.setExtensionsCollapsed(!extensions.collapsed);
 $('btn-more-extensions').onclick = () => toggleSitePanel();
+// The section's own menu: where it sits, collapse, manage. Its extensions have their own.
+$('extensions').addEventListener('contextmenu', (e) => {
+  if ((e.target as Element).closest('.extension')) return;
+  e.preventDefault();
+  api.extensionsSectionMenu();
+});
 
 $('btn-site').onclick = () => toggleSitePanel();
 $('btn-copy-link').onclick = () => {

@@ -98,6 +98,39 @@
           </button>
         </div>
         <p class="footnote">Each Space keeps its own colour; in dark mode it becomes a deep tint of that colour.</p>
+
+        <div class="card">
+          <label class="row">
+            <div class="row-text">
+              <strong>Glass window</strong>
+              <small>The sidebar and the window's edges turn see-through, with your desktop blurred behind the Space's colour, like macOS's own apps.</small>
+            </div>
+            <input type="checkbox" id="glass" class="switch" />
+          </label>
+          <div class="row" id="glassTransparencyRow">
+            <div class="row-text">
+              <strong>Transparency</strong>
+              <small>How much of the desktop shows through.</small>
+            </div>
+            <div class="range-control">
+              <span class="range-end" aria-hidden="true">Solid</span>
+              <input type="range" id="glassTransparency" class="range" min="0" max="100" step="5" aria-label="Transparency" />
+              <span class="range-end" aria-hidden="true">Clear</span>
+              <output id="glassTransparencyValue" for="glassTransparency"></output>
+            </div>
+          </div>
+          <label class="row">
+            <div class="row-text">
+              <strong>Extensions in the sidebar</strong>
+              <small>Where pinned extensions sit. Right-click the Extensions section to move it, too.</small>
+            </div>
+            <select id="extensionsPosition" class="select">
+              <option value="top">Top, under the address bar</option>
+              <option value="bottom">Bottom, above the Spaces</option>
+            </select>
+          </label>
+        </div>
+        <p class="footnote" id="glassNote">Glass needs Flecha's macOS build with the glass window patch; elsewhere the window stays opaque.</p>
       </section>
 
       <section class="pane" data-pane="tabs">

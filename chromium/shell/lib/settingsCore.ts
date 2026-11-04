@@ -11,6 +11,9 @@ import { SHORTCUTS, displayKeys, isShortcutId, keysFor, sameKeys, shortcutList }
 /** A modifier and a key, or a function key alone: "Alt+Cmd+K", "F5". */
 const ACCELERATOR = /^((Ctrl|Alt|Shift|Cmd)\+){1,4}[^+]+$|^F\d{1,2}$/;
 
+/** How see-through the window is until changed in Settings › Appearance (0–100). */
+export const GLASS_TRANSPARENCY = 45;
+
 /** What the view needs from the browser it runs in. */
 export interface SettingsEnvironment {
   /** For display only, with the home folder shortened to ~. */
@@ -37,6 +40,9 @@ export function settingsView(store: Store, env: SettingsEnvironment): SettingsVi
     askWhereToSave: !!s.askWhereToSave,
     defaultBrowser: env.defaultBrowser,
     theme: s.theme ?? 'system',
+    glass: s.glass !== false,
+    glassTransparency: s.glassTransparency ?? GLASS_TRANSPARENCY,
+    extensionsPosition: s.extensionsPosition ?? 'bottom',
     archiveAfterHours: s.archiveAfterHours ?? 12,
     peekPinnedLinks: s.peekPinnedLinks !== false,
     shortcuts: shortcutList(s),
@@ -95,6 +101,9 @@ export async function applySettings(store: Store, patch: SettingsPatch, effects:
   if (patch.theme || patch.peekPinnedLinks !== undefined) {
     store.setPreferences({ theme: patch.theme, peekPinnedLinks: patch.peekPinnedLinks });
     effects.theme(store.state.theme ?? 'system');
+  }
+  if (patch.glass !== undefined || patch.glassTransparency !== undefined || patch.extensionsPosition !== undefined) {
+    store.setAppearance({ glass: patch.glass, glassTransparency: patch.glassTransparency, extensionsPosition: patch.extensionsPosition });
   }
   if (patch.openLinksInFlechinha !== undefined) store.setOpenLinksInFlechinha(patch.openLinksInFlechinha);
   if (typeof patch.archiveAfterHours === 'number') store.setArchiveAfter(patch.archiveAfterHours);

@@ -20,12 +20,51 @@ for (const type of ['pointerdown', 'contextmenu'] as const) {
 
 let closeOpenMenu: (() => void) | undefined;
 
+/** Flecha's browser shows real macOS menus (patch 0055); without it the page draws them. */
+export const hasNativeMenus = typeof chrome.flechaPrivate?.showMenu === 'function';
+
+/** The menu as the browser's flat list: a submenu's items name it by index as their parent. */
+function flatten<T>(items: MenuEntry<T>[]) {
+  const rows: chrome.flechaPrivate.MenuItem[] = [];
+  const picks: Array<Picked<T> | undefined> = [];
+  const add = (entries: MenuEntry<T>[], parent?: number) => {
+    for (const item of entries) {
+      const index = rows.length;
+      if ('separator' in item) {
+        rows.push({ separator: true, parent });
+        picks.push(undefined);
+      } else if ('submenu' in item) {
+        rows.push({ label: item.label, parent, enabled: item.enabled !== false });
+        picks.push(undefined);
+        add(item.submenu, index);
+      } else {
+        rows.push({ label: item.label, parent, enabled: item.enabled !== false, checked: item.checked });
+        picks.push(item as Picked<T>);
+      }
+    }
+  };
+  add(items);
+  return { rows, picks };
+}
+
+async function nativeMenu<T>(items: MenuEntry<T>[]): Promise<Picked<T> | undefined> {
+  const { rows, picks } = flatten(items);
+  try {
+    const index = await chrome.flechaPrivate.showMenu(rows, Math.round(pointer.x), Math.round(pointer.y));
+    return index === undefined ? undefined : picks[index];
+  } catch (err) {
+    console.error('Flecha shell: the native menu failed', err);
+    return undefined;
+  }
+}
+
 /**
  * Shows the menu at the pointer; resolves with the item picked, or undefined if dismissed.
  * It behaves like a macOS menu: one highlighted item, which the pointer and the arrow keys
  * both move; submenus open beside their item, on hover or →.
  */
 export function popupMenu<T>(items: MenuEntry<T>[]): Promise<Picked<T> | undefined> {
+  if (hasNativeMenus) return nativeMenu(items);
   closeOpenMenu?.();
   return new Promise((resolve) => {
     const layer = document.createElement('div');
