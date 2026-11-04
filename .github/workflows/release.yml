@@ -1,0 +1,174 @@
+# The whole browser, release build: Chromium with Flecha's patches, the shell inside, signed
+# and packed into a dmg, uploaded as this run's artifact (and to a GitHub Release for a tag).
+#
+# It runs on your own Mac as a self-hosted runner: GitHub's hosted Macs have neither the disk
+# (Chromium wants 100 GB or more) nor the time (a release build takes 3 to 6 hours, more on a
+# first build; hosted jobs stop at 6 hours). Set the runner up once:
+#   Settings › Actions › Runners › New self-hosted runner › macOS › ARM64, run the commands it
+#   shows on the Mac, then ./svc.sh install && ./svc.sh start so it runs in the background.
+#
+# The first run fetches depot_tools and the Chromium checkout (about 100 GB, a few hours)
+# into FLECHA_BUILD_ROOT, ~/flecha-build unless you set the repository variable
+# FLECHA_BUILD_ROOT (Settings › Secrets and variables › Actions › Variables). Later runs reuse
+# it and only rebuild what changed. The Mac needs Xcode (with its command line tools).
+#
+# Optional repository secrets, for a build others can open without warnings:
+#   FLECHA_SIGN_IDENTITY   "Developer ID Application: Your Name (TEAMID)", in the runner's keychain
+#   FLECHA_NOTARY_PROFILE  a notarytool keychain profile (xcrun notarytool store-credentials)
+# Without them the app is signed ad hoc: after installing it, run
+#   xattr -dr com.apple.quarantine /Applications/Flecha.app
+name: Release build
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: CPU to build for
+        type: choice
+        options: [arm64, x64]
+        default: arm64
+      official:
+        description: Official build (ThinLTO; slower, a full rebuild when switched)
+        type: boolean
+        default: false
+      updates:
+        description: Keep Sparkle updates from flecha.dev (they would replace this build with upstream Flecha)
+        type: boolean
+        default: false
+      reapply:
+        description: Apply the patches again even if they look applied
+        type: boolean
+        default: false
+  push:
+    tags: ['v*']
+
+# One build at a time: they share the checkout and its out folders.
+concurrency:
+  group: flecha-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Flecha (${{ inputs.arch || 'arm64' }})
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 1440
+    env:
+      FLECHA_ARCH: ${{ inputs.arch || 'arm64' }}
+      FLECHA_OFFICIAL: ${{ inputs.official && '1' || '0' }}
+      FLECHA_REAPPLY: ${{ inputs.reapply && '1' || '0' }}
+      SPARKLE_UPDATES: ${{ inputs.updates && '1' || '0' }}
+      FLECHA_SIGN_IDENTITY: ${{ secrets.FLECHA_SIGN_IDENTITY }}
+      FLECHA_NOTARY_PROFILE: ${{ secrets.FLECHA_NOTARY_PROFILE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The app's build number counts Flecha's commits (build-release.sh).
+          fetch-depth: 0
+
+      # An official Node build: the app bundles it for the native host, and it must link only
+      # to system libraries (package-release.sh).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          architecture: ${{ env.FLECHA_ARCH }}
+          cache: npm
+
+      - name: Where things live
+        run: |
+          root="${{ vars.FLECHA_BUILD_ROOT }}"
+          root="${root:-$HOME/flecha-build}"
+          mkdir -p "$root/chromium"
+          {
+            echo "FLECHA_BUILD_ROOT=$root"
+            # env.sh mounts its disk image unless $FLECHA_VOLUME/chromium exists; here it does.
+            echo "FLECHA_VOLUME=$root"
+            echo "FLECHA_DISK=$root"
+            echo "DEPOT_TOOLS=$root/depot_tools"
+            echo "CHROMIUM_SRC=$root/chromium/src"
+            echo "FLECHA_NODE=$(command -v node)"
+          } >>"$GITHUB_ENV"
+          echo "$root/depot_tools" >>"$GITHUB_PATH"
+          xcodebuild -version
+          df -h "$root"
+
+      - name: depot_tools
+        run: |
+          if [ -d "$DEPOT_TOOLS/.git" ]; then
+            git -C "$DEPOT_TOOLS" pull --ff-only --quiet || true
+          else
+            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS"
+          fi
+
+      - name: Chromium checkout
+        run: |
+          version="$(tr -d '[:space:]' <chromium/CHROMIUM_VERSION)"
+          cd "$FLECHA_BUILD_ROOT/chromium"
+          stamp="$PWD/.flecha-chromium-version"
+          if [ -d src/.git ] && [ "$(cat "$stamp" 2>/dev/null)" = "$version" ]; then
+            echo "Chromium $version is already here"
+            exit 0
+          fi
+          # Pinned to Flecha's Chromium tag, without history (far smaller).
+          cat >.gclient <<EOF
+          solutions = [{
+            "name": "src",
+            "url": "https://chromium.googlesource.com/chromium/src.git@refs/tags/$version",
+            "managed": False,
+            "custom_deps": {},
+            "custom_vars": {"checkout_pgo_profiles": False},
+          }]
+          target_os = ["mac"]
+          EOF
+          # --reset drops Flecha's patches from an older checkout; they go on again below.
+          gclient sync --no-history --nohooks --reset --delete_unversioned_trees --force
+          gclient runhooks
+          echo "$version" >"$stamp"
+          echo "FLECHA_REAPPLY=1" >>"$GITHUB_ENV"
+
+      - run: npm ci
+
+      # Upstream Flecha's update feed would offer its own releases, which replace this build
+      # (and its changes) as soon as one is newer. Off unless the run asks for it.
+      - name: Updates
+        if: env.SPARKLE_UPDATES != '1'
+        run: |
+          sed -i '' \
+            -e 's|^flecha_sparkle_framework = .*|flecha_sparkle_framework = ""|' \
+            -e 's|^flecha_sparkle_feed_url = .*|flecha_sparkle_feed_url = ""|' \
+            -e 's|^flecha_sparkle_public_key = .*|flecha_sparkle_public_key = ""|' \
+            chromium/build/release.gn
+          grep '^flecha_sparkle' chromium/build/release.gn
+
+      - name: Build and package (3 to 6 hours)
+        run: chromium/scripts/build-release.sh --dmg
+
+      - name: Find the dmg
+        id: dmg
+        run: |
+          case "$FLECHA_ARCH" in
+            x64) out="$CHROMIUM_SRC/out/Release-x64" ;;
+            *) out="$CHROMIUM_SRC/out/Release" ;;
+          esac
+          dmg="$(ls -t "$out"/flecha-release/*.dmg | head -n 1)"
+          echo "path=$dmg" >>"$GITHUB_OUTPUT"
+          echo "name=$(basename "$dmg" .dmg)" >>"$GITHUB_OUTPUT"
+          ls -lh "$dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.dmg.outputs.name }}
+          path: ${{ steps.dmg.outputs.path }}
+          compression-level: 0
+          retention-days: 30
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --title "Flecha $GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "${{ steps.dmg.outputs.path }}" --clobber
